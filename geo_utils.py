@@ -250,10 +250,10 @@ def resolution_intelligente_geo(gdf, cols_attr, utiliser_geom, decimales):
 
 # ------------------------------------------------------------------ export
 FORMATS_EXPORT = {
+    "Shapefile zippé (.shp, .shx, .dbf, .prj)": ("zip", "application/zip"),
+    "KML (.kml)": ("kml", "application/vnd.google-earth.kml+xml"),
     "GeoPackage (.gpkg)": ("gpkg", "application/geopackage+sqlite3"),
     "GeoJSON (.geojson)": ("geojson", "application/geo+json"),
-    "Shapefile zippé (.zip)": ("zip", "application/zip"),
-    "KML (.kml)": ("kml", "application/vnd.google-earth.kml+xml"),
     "Excel (.xlsx, attributs + WKT)": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     "CSV (.csv, attributs + WKT)": ("csv", "text/csv"),
 }
@@ -267,10 +267,27 @@ def vers_table_wkt(gdf):
     return t
 
 
+def _noms_shapefile(cols):
+    """Noms de champs de 10 caractères maximum, uniques. Retourne {ancien: nouveau}."""
+    pris, mapping = set(), {}
+    for c in cols:
+        base = str(c)[:10]
+        n, k = base, 1
+        while n.lower() in pris:
+            suf = str(k)
+            n = base[: 10 - len(suf)] + suf
+            k += 1
+        pris.add(n.lower())
+        mapping[c] = n
+    return mapping
+
+
 def exporter_geo(gdf, libelle_format):
-    """Retourne (octets, extension, mime). Lève une exception explicite si le format ne convient pas."""
+    """Retourne (octets, extension, mime, notes)."""
     ext, mime = FORMATS_EXPORT[libelle_format]
-    g = gdf.drop(columns=[c for c in gdf.columns if c.startswith("__") and c != gdf.geometry.name], errors="ignore")
+    nom_geom = gdf.geometry.name
+    g = gdf.drop(columns=[c for c in gdf.columns if str(c).startswith("__") and c != nom_geom], errors="ignore")
+    notes = []
 
     if ext in ("xlsx", "csv"):
         t = vers_table_wkt(g)
@@ -278,29 +295,85 @@ def exporter_geo(gdf, libelle_format):
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
                 t.to_excel(w, index=False, sheet_name="Donnees")
-            return buf.getvalue(), ext, mime
-        return t.to_csv(index=False).encode("utf-8-sig"), ext, mime
+            return buf.getvalue(), ext, mime, notes
+        return t.to_csv(index=False).encode("utf-8-sig"), ext, mime, notes
 
     if ext in ("geojson", "kml") and g.crs is not None and g.crs.to_epsg() != 4326:
         g = g.to_crs(4326)
+        notes.append("Coordonnées converties en WGS 84 (EPSG:4326), requis pour ce format.")
+    # les dates avec heure ne passent pas partout : conversion en texte
+    for c in g.columns:
+        if c != nom_geom and pd.api.types.is_datetime64_any_dtype(g[c]):
+            g[c] = g[c].astype(str).replace("NaT", None)
 
     tmp = Path(tempfile.mkdtemp(prefix="exp_"))
     try:
         if ext == "zip":
-            if g.geom_type.dropna().map(lambda s: s.replace("Multi", "")).nunique() > 1:
-                raise ValueError("Le format Shapefile n'accepte qu'un seul type de géométrie (points, lignes ou polygones). "
-                                 "Choisissez GeoPackage ou GeoJSON.")
-            dossier = tmp / "shp"
-            dossier.mkdir()
-            g.to_file(dossier / "donnees.shp", encoding="utf-8")
+            attrs = [c for c in g.columns if c != nom_geom]
+            mapping = _noms_shapefile(attrs)
+            changes = {a: b for a, b in mapping.items() if a != b}
+            if changes:
+                notes.append("Noms de champs raccourcis à 10 caractères (limite du Shapefile) : "
+                             + ", ".join(f"{a} → {b}" for a, b in list(changes.items())[:12]) + (" ..." if len(changes) > 12 else ""))
+            g = g.rename(columns=mapping)
+            familles = g.geometry.dropna().geom_type.str.replace("Multi", "", regex=False)
+            types = sorted(familles.unique())
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                for p in sorted(dossier.iterdir()):
-                    z.write(p, p.name)
-            return buf.getvalue(), ext, mime
+                groupes = [(None, g)] if len(types) <= 1 else [(t, g[g.geometry.geom_type.fillna("").str.replace("Multi", "", regex=False) == t]) for t in types]
+                if len(types) > 1:
+                    notes.append("La couche mélange plusieurs types de géométrie : un shapefile distinct a été créé pour chacun ("
+                                 + ", ".join(types) + ").")
+                for t, sous in groupes:
+                    stem = "donnees" if t is None else f"donnees_{t.lower()}"
+                    dossier = tmp / stem
+                    dossier.mkdir()
+                    sous.to_file(dossier / f"{stem}.shp", encoding="utf-8")
+                    for p in sorted(dossier.iterdir()):
+                        z.write(p, p.name)
+            return buf.getvalue(), ext, mime, notes
         driver = {"gpkg": "GPKG", "geojson": "GeoJSON", "kml": "KML"}[ext]
         chemin = tmp / f"donnees.{ext}"
         g.to_file(chemin, driver=driver)
-        return chemin.read_bytes(), ext, mime
+        return chemin.read_bytes(), ext, mime, notes
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+FORMATS_TABLE = {
+    "Excel (.xlsx)": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "CSV (.csv, UTF-8)": ("csv", "text/csv"),
+    "SPSS (.sav)": ("sav", "application/octet-stream"),
+    "Stata (.dta)": ("dta", "application/octet-stream"),
+    "JSON (.json)": ("json", "application/json"),
+}
+
+
+def exporter_table(df, libelle_format):
+    """Retourne (octets, extension, mime, notes) pour une table sans géométrie."""
+    ext, mime = FORMATS_TABLE[libelle_format]
+    notes = []
+    if ext == "xlsx":
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as w:
+            df.to_excel(w, index=False, sheet_name="Donnees")
+        return buf.getvalue(), ext, mime, notes
+    if ext == "csv":
+        return df.to_csv(index=False).encode("utf-8-sig"), ext, mime, notes
+    if ext == "json":
+        return df.to_json(orient="records", force_ascii=False, date_format="iso").encode("utf-8"), ext, mime, notes
+    import pyreadstat
+    d = df.copy()
+    for c in d.columns:
+        if d[c].dtype == "object" or str(d[c].dtype).startswith("str"):
+            d[c] = d[c].astype(object).where(d[c].notna(), None)
+    tmp = Path(tempfile.mkdtemp(prefix="exp_"))
+    try:
+        chemin = tmp / f"donnees.{ext}"
+        if ext == "sav":
+            pyreadstat.write_sav(d, str(chemin))
+        else:
+            pyreadstat.write_dta(d, str(chemin))
+        return chemin.read_bytes(), ext, mime, notes
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
