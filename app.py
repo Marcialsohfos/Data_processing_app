@@ -294,7 +294,7 @@ def main():
                                 table, cles = gu.table_cles(gdf, st.session_state.cols_attr, st.session_state.utiliser_geom, st.session_state.decimales)
                                 masque = table.duplicated(subset=cles, keep=False)
                                 # regroupe les doublons : tri par position, sinon par les colonnes clés
-                                ordre = table["__geom__"] if "__geom__" in table else table[cles].astype(str).agg("|".join, axis=1)
+                                ordre = table["__geom__"] if "__geom__" in table else gu.cle_texte(table, cles)
                                 doublons_view = vue_apercu(gdf, masque, ordre)
                             else:
                                 doublons_view = df[df.duplicated(subset=st.session_state.cols_attr, keep=False)].sort_values(by=st.session_state.cols_attr)

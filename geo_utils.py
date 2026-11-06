@@ -223,6 +223,15 @@ def table_cles(gdf, cols_attr, utiliser_geom, decimales):
     return t, cles
 
 
+def cle_texte(table, cles):
+    """Concatène les colonnes clés en texte (valeurs manquantes = chaîne vide), compatible pandas 2 et 3."""
+    out = pd.Series("", index=table.index, dtype="object")
+    for i, c in enumerate(cles):
+        morceau = table[c].map(lambda v: "" if pd.isna(v) else str(v)).astype("object")
+        out = morceau if i == 0 else out + "|" + morceau
+    return out
+
+
 def resolution_intelligente_geo(gdf, cols_attr, utiliser_geom, decimales):
     """
     Même logique que l'application : parmi les doublons, on garde la ligne la plus complète.
