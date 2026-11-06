@@ -238,6 +238,7 @@ def resolution_intelligente_geo(gdf, cols_attr, utiliser_geom, decimales):
     Score = nombre d'attributs renseignés + 1 si la géométrie est présente.
     Retourne (base_propre, rejets), dans l'ordre d'origine.
     """
+    index_origine = gdf.index                     # on le restitue : l'application réassocie les géométries par cet index
     g = gdf.reset_index(drop=True)
     t, cles = table_cles(g, cols_attr, utiliser_geom, decimales)
     attrs = pd.DataFrame(g.drop(columns=g.geometry.name))
@@ -245,7 +246,10 @@ def resolution_intelligente_geo(gdf, cols_attr, utiliser_geom, decimales):
     ordre = score.sort_values(ascending=False, kind="stable").index
     garde = t.loc[ordre].drop_duplicates(subset=cles, keep="first").index
     garde_mask = g.index.isin(garde)
-    return g[garde_mask].copy(), g[~garde_mask].copy()
+    propre, rejets = g[garde_mask].copy(), g[~garde_mask].copy()
+    propre.index = index_origine[garde_mask]
+    rejets.index = index_origine[~garde_mask]
+    return propre, rejets
 
 
 # ------------------------------------------------------------------ export

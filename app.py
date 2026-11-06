@@ -185,7 +185,11 @@ def maj_attrs(df_new, etape, detail, cellules=0, motif=None, params=None):
         r["__motif__"] = motif or etape
         S.rejets.append(r)
     if S.is_geo:
-        S.gdf = gpd.GeoDataFrame(df_new.copy(), geometry=S.gdf.geometry.loc[df_new.index].values,
+        # alignement par position : robuste si l'index a été modifié par une étape précédente
+        pos = S.gdf.index.get_indexer(df_new.index)
+        if (pos < 0).any() or not S.gdf.index.is_unique:
+            raise ValueError("Index de la table de travail incohérent avec la géométrie : rechargez le fichier et relancez le traitement.")
+        S.gdf = gpd.GeoDataFrame(df_new.copy(), geometry=S.gdf.geometry.iloc[pos].values,
                                  crs=S.gdf.crs, index=df_new.index)
     S.data = df_new
     journaliser(etape, detail, av, S.data.shape, cellules)
